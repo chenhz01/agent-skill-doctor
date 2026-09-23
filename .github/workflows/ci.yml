@@ -30,3 +30,13 @@ jobs:
           if [ "$rc" -eq 0 ]; then echo "negative fixture unexpectedly passed"; exit 1; fi
           if [ "$rc" -ne 3 ]; then echo "expected exit 3, got $rc"; exit 1; fi
         shell: bash
+      - name: CLI smoke (ledger + graph)
+        run: |
+          set -e
+          python doctor.py ledger fixtures > /dev/null
+          python doctor.py ledger fixtures --json > base.json
+          echo "tampered" >> fixtures/good-skill/SKILL.md
+          python doctor.py ledger fixtures --baseline base.json --json | grep -q '"changed"'
+          git checkout -- fixtures/good-skill/SKILL.md 2>/dev/null || true
+          python doctor.py graph fixtures > /dev/null
+        shell: bash

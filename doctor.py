@@ -3,24 +3,28 @@
 """
 doctor.py — Agent Skill health selfcheck (part of agent-skill-doctor)
 
-Static, offline, read-only health checks for a single agent skill directory
-(the de-facto SKILL.md layout used by OpenAI / Anthropic / community skill
-ecosystems):
+Subcommands (v0.2):
 
-  1. Frontmatter integrity --- block exists; `name` present and (warn) equal
-     to the directory name; `description` non-empty; `version` declared (warn)
-  2. Referenced files exist  --- backtick-quoted repo-relative paths in
-     SKILL.md (scripts/..., data/..., bin/..., memory/..., assets/...,
-     templates/...) must actually exist
-  3. Scripts compile         --- .py via py_compile; .js via `node --check`
-     (skipped with a SKIP finding if node is unavailable)
+  python doctor.py check <skill_dir> [--json]
+      Static, offline, read-only health checks for one skill:
+        1. Frontmatter integrity --- block exists; `name` present and (warn)
+           equal to the directory name; `description` non-empty; `version`
+           declared (warn)
+        2. Referenced files exist --- backtick-quoted repo-relative paths in
+           SKILL.md must actually exist
+        3. Scripts compile --- .py via py_compile; .js via `node --check`
+  python doctor.py check --all <skills_root> [--json]
+      Run check on every child dir that has SKILL.md.
+  python doctor.py ledger <skills_root> [--baseline prev.json] [--json]
+      Integrity ledger: one entry per skill with a sha16 content fingerprint;
+      with --baseline, prints a changed/added/removed tamper report.
+  python doctor.py graph <skills_root> [--json]
+      Cross-reference dependency graph: edges, top-referenced, orphans.
 
-Usage:
-  python doctor.py <skill_dir>            # human-readable report
-  python doctor.py <skill_dir> --json     # machine-readable (stdout)
-  python doctor.py --all <skills_root>    # every child dir that has SKILL.md
+Backward compatible: `python doctor.py <skill_dir>` still means `check`.
 
-Exit codes: 0 = all clean, 3 = findings (FAIL and/or WARN), 1 = runtime error.
+Exit codes: check -> 0 clean / 3 findings / 1 error;
+            ledger, graph -> 0 ok / 1 error.
 """
 import json
 import os
@@ -31,7 +35,15 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = "0.1.0"
+try:
+    import graph as graph_mod
+    import ledger as ledger_mod
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import graph as graph_mod
+    import ledger as ledger_mod
+
+VERSION = "0.2.0"
 
 REF_DIRS = ("scripts", "data", "bin", "memory", "assets", "templates")
 REF_RE = re.compile(
@@ -141,43 +153,113 @@ def summarize(skill_dir, findings):
     }
 
 
+def _emit(payload, as_json, human_lines):
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        for line in human_lines:
+            print(line)
+
+
+def _run_check(args, as_json):
+    if args and args[0] == "--all":
+        root = args[1]
+        results = []
+        for name in sorted(os.listdir(root)):
+            sd = os.path.join(root, name)
+            if os.path.isdir(sd) and os.path.isfile(os.path.join(sd, "SKILL.md")):
+                results.append(summarize(sd, run(sd)))
+        payload = {"tool": "agent-skill-doctor", "version": VERSION,
+                   "skills_root": root, "count": len(results), "results": results}
+        _emit(payload, as_json, [
+            "[%s] %s  FAIL=%d WARN=%d SKIP=%d"
+            % (r["skill"], r["status"], r["fail"], r["warn"], r["skip"])
+            for r in results])
+        sys.exit(0)
+    if not args:
+        print("usage: python doctor.py check <skill_dir> [--json] | "
+              "check --all <root> | ledger <root> [--baseline f] | graph <root>")
+        sys.exit(1)
+    skill_dir = args[0]
+    if not os.path.isdir(skill_dir):
+        print("not a directory: %s" % skill_dir)
+        sys.exit(1)
+    out = summarize(skill_dir, run(skill_dir))
+    _emit(out, as_json,
+          ["[%s] %s  FAIL=%d WARN=%d SKIP=%d"
+           % (out["skill"], out["status"], out["fail"], out["warn"], out["skip"])]
+          + ["  [%s] %s  %s" % (f["level"], f["item"], f["detail"][:90])
+             for f in out["findings"]])
+    sys.exit(0 if not out["findings"] else 3)
+
+
+def _run_ledger(args, as_json):
+    baseline_path = None
+    if "--baseline" in args:
+        i = args.index("--baseline")
+        baseline_path = args[i + 1]
+        del args[i:i + 2]
+    if not args:
+        print("usage: python doctor.py ledger <skills_root> [--baseline prev.json] [--json]")
+        sys.exit(1)
+    root = args[0]
+    if not os.path.isdir(root):
+        print("not a directory: %s" % root)
+        sys.exit(1)
+    ledger = ledger_mod.build(root)
+    payload = {"tool": "agent-skill-doctor-ledger", "version": VERSION, **ledger}
+    human = ["ledger: %d skills, errors=%d" % (ledger["total"], len(ledger["errors"]))]
+    if baseline_path:
+        with open(baseline_path, encoding="utf-8") as fh:
+            old = json.load(fh)
+        diff = ledger_mod.diff_baseline(old, ledger)
+        payload["diff"] = diff
+        human += ["vs baseline: +%d added / -%d removed / ~%d changed / =%d unchanged"
+                  % (len(diff["added"]), len(diff["removed"]),
+                     len(diff["changed"]), len(diff["unchanged"]))]
+        for k in ("added", "removed", "changed"):
+            if diff[k]:
+                human.append("  %s: %s" % (k, ", ".join(diff[k])))
+    _emit(payload, as_json, human)
+    sys.exit(0)
+
+
+def _run_graph(args, as_json):
+    if not args:
+        print("usage: python doctor.py graph <skills_root> [--json]")
+        sys.exit(1)
+    root = args[0]
+    if not os.path.isdir(root):
+        print("not a directory: %s" % root)
+        sys.exit(1)
+    g = graph_mod.build(root)
+    payload = {"tool": "agent-skill-doctor-graph", "version": VERSION, **g}
+    human = ["graph: %d nodes, %d edges, orphans=%d"
+             % (g["total"], len(g["edges"]), len(g["orphans"]))]
+    if g["top_referenced"]:
+        human.append("  top-referenced: %s" % ", ".join(g["top_referenced"]))
+    if g["orphans"]:
+        human.append("  orphans: %s" % ", ".join(g["orphans"]))
+    _emit(payload, as_json, human)
+    sys.exit(0)
+
+
 def main(argv):
     args = list(argv)
     as_json = "--json" in args
     if as_json:
         args.remove("--json")
     try:
-        if args and args[0] == "--all":
-            root = args[1]
-            results = []
-            for name in sorted(os.listdir(root)):
-                sd = os.path.join(root, name)
-                if os.path.isdir(sd) and os.path.isfile(os.path.join(sd, "SKILL.md")):
-                    results.append(summarize(sd, run(sd)))
-            payload = {"skills_root": root, "count": len(results), "results": results}
-            if as_json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            else:
-                for r in results:
-                    print("[%s] %s  FAIL=%d WARN=%d SKIP=%d"
-                          % (r["skill"], r["status"], r["fail"], r["warn"], r["skip"]))
-            sys.exit(0)
-        if not args:
-            print("usage: python doctor.py <skill_dir> [--json] | --all <skills_root>")
-            sys.exit(1)
-        skill_dir = args[0]
-        if not os.path.isdir(skill_dir):
-            print("not a directory: %s" % skill_dir)
-            sys.exit(1)
-        out = summarize(skill_dir, run(skill_dir))
-        if as_json:
-            print(json.dumps(out, ensure_ascii=False, indent=2))
-        else:
-            print("[%s] %s  FAIL=%d WARN=%d SKIP=%d"
-                  % (out["skill"], out["status"], out["fail"], out["warn"], out["skip"]))
-            for f in out["findings"]:
-                print("  [%s] %s  %s" % (f["level"], f["item"], f["detail"][:90]))
-        sys.exit(0 if not out["findings"] else 3)
+        cmd = "check"
+        rest = args
+        if args and args[0] in ("check", "ledger", "graph"):
+            cmd = args[0]
+            rest = args[1:]
+        if cmd == "ledger":
+            _run_ledger(rest, as_json)
+        if cmd == "graph":
+            _run_graph(rest, as_json)
+        _run_check(rest, as_json)
     except SystemExit:
         raise
     except Exception as e:

@@ -5,20 +5,31 @@ Offline health checks and a structural pain-radar for **agent skill libraries** 
 You have 50, 100, maybe 200 skills. Nobody has run them since last month. A referenced script was renamed, a YAML frontmatter field went missing, a `.py` file rotted past a syntax change — and you only find out when the agent fails mid-task, in production, with a user watching. This tool catches all of that **before** the agent runs, in milliseconds, with zero network access.
 
 ```bash
-python doctor.py <skill_dir>          # one skill: frontmatter, refs, script compile
-python doctor.py --all <skills_root>  # every skill in your library
-python radar.py   <skills_root>       # rank which skill deserves attention first
+python doctor.py check <skill_dir>          # one skill: frontmatter, refs, script compile
+python doctor.py check --all <skills_root>  # every skill in your library
+python doctor.py ledger <skills_root>       # integrity ledger: sha16 per skill
+python doctor.py ledger <skills_root> --baseline prev.json   # tamper report
+python doctor.py graph  <skills_root>       # dependency graph + orphan detection
+python radar.py <skills_root>               # rank which skill deserves attention first
 ```
 
-Exit codes are contract: `0` clean, `3` findings, `1` tool error — so you can wire it into CI in one line.
+Exit codes are contract: `0` clean, `3` findings, `1` tool error — so you can wire it into CI in one line. (`python doctor.py <skill_dir>` still works as an alias for `check`.)
 
-## What `doctor.py` checks
+## What `check` reports
 
 | Check | Level | Catches |
 |---|---|---|
 | Frontmatter integrity (`name`/`description`/`version`) | FAIL/WARN | silent skill-loading failures, unversioned assets |
 | Backtick-referenced files exist (`scripts/…`, `data/…`, `bin/…`) | FAIL | renamed/moved scripts that break the skill at runtime |
 | Every `.py` / `.js` compiles (`py_compile` / `node --check`) | FAIL | rotted scripts, mid-refactor leftovers |
+
+## What `ledger` proves (the supply-chain half)
+
+A skill library is a software supply chain, and almost nobody keeps a manifest of it. `ledger` writes one: per skill — version, dependencies, and a **sha16 content fingerprint** of SKILL.md. Run with `--baseline` against a previous ledger and you get an exact **added / removed / changed** report — if a file was edited, you see it; if nothing changed, the fingerprints prove it. Version extraction follows one honesty rule: a version must be *declared* (near a `version`/`v` cue), tokens inside fenced code examples belong to external subjects and are ignored, and when in doubt the field stays empty — missing beats wrong.
+
+## What `graph` finds
+
+Cross-reference edges between skills (word-boundary matched, so `skill-bb` never lights up `skill-b`), the most load-bearing skills, and **orphans** — skills nobody references and that reference nobody. Orphans are your archive-or-promote decision list.
 
 ## What `radar.py` ranks
 
@@ -30,7 +41,7 @@ This repo is the **structural half** of the system. It does *not* claim to answe
 
 ## Tests
 
-10 tests, mutation-testing flavored: a broken fixture **must** FAIL (and exit 3), a clean fixture **must** PASS (and exit 0) — a doctor that cannot catch a sick skill is worse than no doctor.
+21 tests, mutation-testing flavored: a broken fixture **must** FAIL (and exit 3), a clean fixture **must** PASS (and exit 0) — a doctor that cannot catch a sick skill is worse than no doctor. The ledger's tamper report is tested bidirectionally too: an edited file must show as `changed`, a fingerprint must be stable across runs.
 
 ```bash
 python -m unittest discover -s tests -v
@@ -44,11 +55,11 @@ Everything in this repo is free forever: read it, run it, fork it, and we will n
 
 | Tier | What it is | Concrete |
 |---|---|---|
-| 🌱 Open | everything in this repo | 2 tools (~330 lines), 10 tests, 2 fixtures, CI |
+| 🌱 Open | everything in this repo | 4 tools (~660 lines), 21 tests, 2 fixtures, CI |
 | 🔑 Partner | shipped on collaboration, not on request | library-wide adoption playbook; CI integration recipes for monorepos; evidence-graded maturity reports for your own skill library |
 | 💎 Never shipped | stays in-house regardless | the evidence-grading engine that answers "did it improve after use", its tamper-resistance design, and the gap-ticket state machine that turns findings into a closed loop |
 
-Why keep those back? Because the structural checks in this repo can only see *today's files* — the locked part answers *what happened over the lifetime of the skill*, using host-level write snapshots and content fingerprints. That machinery is tightly coupled to our own runtime and leaks operational details we are not willing to publish; it is **not in this repository** and the open half does not pretend to reproduce it. Partners get the interface and the methodology, not the recipe.
+Why keep those back? Because the structural checks and the sha16 ledger in this repo can only see *today's files* — the locked part answers *what happened over the lifetime of the skill*: whether it was actually used, and whether it measurably improved after that use, using host-level write snapshots and rolling-fingerprint evidence grading. That machinery is tightly coupled to our own runtime and leaks operational details we are not willing to publish; it is **not in this repository** and the open half does not pretend to reproduce it. Partners get the interface and the methodology, not the recipe.
 
 **How to ask.** Write to hcac4735@agent.qq.com (or shanlun2029@outlook.com if you are overseas — reachability of the first address abroad is not guaranteed, the second is). Include two things: (1) what you are building and where agent skills sit in it, (2) which tier you want and what you already tried. A one-line message gets a one-line reply; substantive ones get an answer within 48h.
 
