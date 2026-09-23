@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run test suite
+        run: python -m unittest discover -s tests -v
+      - name: CLI smoke (positive)
+        run: python doctor.py fixtures/good-skill
+      - name: CLI smoke (negative must exit 3)
+        run: |
+          set +e
+          python doctor.py fixtures/broken-skill
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then echo "negative fixture unexpectedly passed"; exit 1; fi
+          if [ "$rc" -ne 3 ]; then echo "expected exit 3, got $rc"; exit 1; fi
+        shell: bash
